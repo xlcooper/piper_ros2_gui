@@ -3,7 +3,7 @@
 Piper X 机械臂的 ROS 2 桌面控制界面。通过 `agx_arm_ctrl` 接收状态并发送控制指令，
 使用 PyQt5 构建界面，使用 VTK 显示实时 3D 姿态。
 
-[![AgileX 官方 GitHub](https://img.shields.io/badge/AgileX-Official%20GitHub-24292f?logo=github)](https://github.com/agilexrobotics)
+官方链接：[![AgileX 官方 GitHub](https://img.shields.io/badge/AgileX-%E5%AE%98%E6%96%B9%20GitHub-24292f?logo=github)](https://github.com/agilexrobotics)
 
 ![Piper ROS 2 GUI 界面](docs/images/piper-ros2-gui.png)
 
@@ -72,7 +72,8 @@ source install/setup.bash
 
 ## 配置 CAN
 
-USB-CAN 需要注册为 `can0`，波特率必须为 `1 Mbps`：
+Piper 使用 `1,000,000 bit/s` 的 CAN 波特率。SocketCAN 接口名称可以自定义；
+下面的命令将目标接口命名为 `can0`，这是本项目启动示例和 GUI 状态检测使用的默认名称。
 
 ```bash
 cd ~/agx_arm_ws/src/agx_arm_ros/scripts
@@ -81,8 +82,12 @@ bash can_activate.sh can0 1000000
 ip -details link show can0
 ```
 
-输出应包含 `UP`、`state ERROR-ACTIVE` 和 `bitrate 1000000`。
-`ERROR-ACTIVE` 是正常活动状态。重启或重新插拔 CAN 后，可能需要再次激活。
+驱动的 `can_port` 参数必须与实际接口名称一致。若使用其他名称，需要同时调整启动参数；
+当前 GUI 的 CAN 状态检测仍以 `can0` 为准。
+
+健康的接口通常显示 `UP`、`state ERROR-ACTIVE` 和 `bitrate 1000000`。
+`ERROR-ACTIVE` 是 Linux 显示的 CAN 错误约束状态名称，通常表示控制器仍可正常通信，
+并不等同于机械臂故障。重启或重新插拔 CAN 后，可能需要再次激活。
 多 CAN 模块配置请参考[官方 CAN 指南](https://github.com/agilexrobotics/agx_arm_ros/blob/ros2/docs/CAN_USER.md)。
 
 可使用以下命令确认机械臂正在发送数据：
@@ -91,7 +96,7 @@ ip -details link show can0
 candump can0
 ```
 
-收到数据后按 `Ctrl+C` 退出。不要同时运行多个控制 `can0` 的机械臂驱动。
+收到数据后按 `Ctrl+C` 退出。不要让多个机械臂驱动同时向同一物理 CAN 总线发送指令。
 
 ## 启动
 
