@@ -3,6 +3,10 @@
 面向 AgileX Piper X 机械臂的 ROS 2 桌面控制界面。项目使用 PyQt5 构建，
 通过 `agx_arm_ctrl` 收发 ROS 2 数据，并使用 VTK 实时显示机械臂姿态。
 
+[![AgileX 官方仓库](https://img.shields.io/badge/AgileX-Official%20Repository-24292f?logo=github)](https://github.com/agilexrobotics/agx_arm_ros)
+
+![Piper ROS 2 GUI 界面](docs/images/piper-ros2-gui.png)
+
 > [!WARNING]
 > 本项目会向真实机械臂发送控制指令。运行前请清空工作空间、确认实体急停可用，
 > 并从低速和小角度开始测试。软件停止不能替代实体急停。
