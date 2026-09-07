@@ -3,19 +3,13 @@
 本项目基于 ROS 2、PyQt5 和 VTK 开发，可实现 Piper X 机械臂的关节与夹爪控制、
 运行状态监测、操作日志记录和实时 3D 姿态可视化。
 
+官方链接：[![AgileX 官方 GitHub](https://img.shields.io/badge/AgileX-%E5%AE%98%E6%96%B9%20GitHub-24292f?logo=github)](https://github.com/agilexrobotics)
+
 | Ubuntu | STATE |
 | :---: | :---: |
 | ![Ubuntu 24.04](https://img.shields.io/badge/Ubuntu-24.04-E95420) | ![Pass](https://img.shields.io/badge/-Pass-2F80C1) |
 
-官方链接：[![AgileX 官方 GitHub](https://img.shields.io/badge/AgileX-%E5%AE%98%E6%96%B9%20GitHub-24292f?logo=github)](https://github.com/agilexrobotics)
-
-![Piper ROS 2 GUI 界面](docs/images/piper-ros2-gui.png)
-
-> [!WARNING]
-> 本项目会控制真实机械臂。运行前请清空工作区域并确认实体急停可用。
-> 软件停止不能替代实体急停。
-
-## 功能
+## 主要功能
 
 - 六关节状态、目标控制、微调和点动
 - 整机使能、失能、回零和停止保持
@@ -25,7 +19,15 @@
 - 基于官方 STL 模型的实时 3D 预览
 - 角度限制、反馈超时和操作确认
 
-## 环境
+## 界面预览
+
+![Piper ROS 2 GUI 主界面](docs/images/piper-ros2-gui.png)
+
+> [!WARNING]
+> 本项目会控制真实机械臂。运行前请清空工作区域并确认实体急停可用。
+> 软件停止不能替代实体急停。
+
+## 运行环境
 
 - ROS 2 Jazzy
 - Piper X 与官方 USB-CAN 模块
