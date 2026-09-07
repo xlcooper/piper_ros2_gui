@@ -3,9 +3,9 @@
 本项目基于 ROS 2、PyQt5 和 VTK 开发，可实现 Piper X 机械臂的关节与夹爪控制、
 运行状态监测、操作日志记录和实时 3D 姿态可视化。
 
-| Ubuntu | 状态 |
+| Ubuntu | STATE |
 | :---: | :---: |
-| 24.04 | PASS |
+| ![Ubuntu 24.04](https://img.shields.io/badge/Ubuntu-24.04-E95420) | ![Pass](https://img.shields.io/badge/-Pass-2F80C1) |
 
 官方链接：[![AgileX 官方 GitHub](https://img.shields.io/badge/AgileX-%E5%AE%98%E6%96%B9%20GitHub-24292f?logo=github)](https://github.com/agilexrobotics)
 
