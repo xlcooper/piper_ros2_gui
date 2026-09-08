@@ -969,7 +969,7 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(self.arm_view, 1)
         reset_button.clicked.connect(self.arm_view.reset_camera)
 
-        hint = QLabel("拖动旋转 · 滚轮缩放")
+        hint = QLabel("左键拖动旋转 · 滚轮缩放")
         hint.setObjectName("simulationHint")
         hint.setAlignment(Qt.AlignCenter)
         preview_layout.addWidget(hint)
@@ -1102,9 +1102,19 @@ class MainWindow(QMainWindow):
         group = QGroupBox("关节增量（单位：度）")
         layout = QVBoxLayout(group)
 
-        self.delta_table = QTableWidget(6, 4)
+        controls = QHBoxLayout()
+        controls.addStretch(1)
+        self.jog_unlock_button = QPushButton("解锁增量控制")
+        self.jog_unlock_button.setCheckable(True)
+        self.jog_unlock_button.setObjectName("warningButton")
+        self.jog_unlock_button.setFixedWidth(176)
+        self.jog_unlock_button.clicked.connect(self._toggle_jog_mode)
+        controls.addWidget(self.jog_unlock_button)
+        layout.addLayout(controls)
+
+        self.delta_table = QTableWidget(6, 5)
         self.delta_table.setHorizontalHeaderLabels(
-            ["关节", "当前角度", "增量", "移动"]
+            ["关节", "当前角度", "允许范围", "增量", "移动"]
         )
         self.delta_table.verticalHeader().setVisible(False)
         self.delta_table.setAlternatingRowColors(True)
@@ -1126,18 +1136,26 @@ class MainWindow(QMainWindow):
             self.delta_current_joint_labels.append(degree_label)
             self.delta_table.setCellWidget(row, 1, degree_label)
 
-            delta_spinbox = QDoubleSpinBox()
             lower, upper = JOINT_LIMITS_RAD[row]
+            range_label = QLabel(
+                f"{math.degrees(lower):.0f}° ～ {math.degrees(upper):.0f}°"
+            )
+            range_label.setObjectName("muted")
+            range_label.setAlignment(Qt.AlignCenter)
+            self.delta_table.setCellWidget(row, 2, range_label)
+
+            delta_spinbox = QDoubleSpinBox()
             delta_spinbox.setRange(0.1, math.degrees(upper - lower))
             delta_spinbox.setDecimals(1)
             delta_spinbox.setSingleStep(0.1)
             delta_spinbox.setValue(20.0)
             delta_spinbox.setSuffix("°")
+            delta_spinbox.setAlignment(Qt.AlignCenter)
             delta_spinbox.editingFinished.connect(
                 lambda index=row: self._highlight_joint_row(index)
             )
             self.delta_spinboxes.append(delta_spinbox)
-            self.delta_table.setCellWidget(row, 2, delta_spinbox)
+            self.delta_table.setCellWidget(row, 3, delta_spinbox)
 
             move_widget = QWidget()
             move_layout = QHBoxLayout(move_widget)
@@ -1145,6 +1163,8 @@ class MainWindow(QMainWindow):
             move_layout.setSpacing(6)
             minus_button = QPushButton("−")
             plus_button = QPushButton("+")
+            minus_button.setObjectName("deltaMoveButton")
+            plus_button.setObjectName("deltaMoveButton")
             minus_button.setEnabled(False)
             plus_button.setEnabled(False)
             minus_button.clicked.connect(
@@ -1156,7 +1176,7 @@ class MainWindow(QMainWindow):
             self.jog_buttons.extend((minus_button, plus_button))
             move_layout.addWidget(minus_button)
             move_layout.addWidget(plus_button)
-            self.delta_table.setCellWidget(row, 3, move_widget)
+            self.delta_table.setCellWidget(row, 4, move_widget)
             self.delta_table.setRowHeight(row, 48)
 
         self.delta_table.setFixedHeight(342)
@@ -1165,20 +1185,12 @@ class MainWindow(QMainWindow):
         header.setStretchLastSection(False)
         for column in range(self.delta_table.columnCount()):
             header.setSectionResizeMode(column, QHeaderView.Fixed)
-        self.delta_table.setColumnWidth(0, 86)
-        self.delta_table.setColumnWidth(1, 130)
-        self.delta_table.setColumnWidth(3, 180)
+        self.delta_table.setColumnWidth(0, 78)
+        self.delta_table.setColumnWidth(1, 110)
+        self.delta_table.setColumnWidth(3, 145)
+        self.delta_table.setColumnWidth(4, 176)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         layout.addWidget(self.delta_table)
-
-        controls = QHBoxLayout()
-        controls.addStretch(1)
-        self.jog_unlock_button = QPushButton("解锁增量控制")
-        self.jog_unlock_button.setCheckable(True)
-        self.jog_unlock_button.setObjectName("warningButton")
-        self.jog_unlock_button.clicked.connect(self._toggle_jog_mode)
-        controls.addWidget(self.jog_unlock_button)
-        layout.addLayout(controls)
         return group
 
     def _build_motor_group(self) -> QGroupBox:
@@ -1295,7 +1307,9 @@ class MainWindow(QMainWindow):
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
-            QMainWindow, QWidget { background: #f6f7f8; color: #22272b; }
+            QMainWindow { background: #f6f7f8; color: #22272b; }
+            QWidget { color: #22272b; }
+            QLabel { background: transparent; }
             QWidget#topBar {
                 background: #ffffff; border-bottom: 1px solid #e0e3e5;
             }
@@ -1349,7 +1363,10 @@ class MainWindow(QMainWindow):
                 font-weight: 650; border: 1px solid #dfe3e5; border-radius: 6px;
                 margin-top: 12px; padding: 12px 8px 8px 8px; background: #ffffff;
             }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
+            QGroupBox::title {
+                subcontrol-origin: margin; left: 12px; padding: 0 6px;
+                background: #ffffff; color: #22272b;
+            }
             QPushButton {
                 min-height: 34px; border: 1px solid #c7cdd1; border-radius: 5px;
                 padding: 2px 14px; background: #ffffff;
@@ -1358,6 +1375,15 @@ class MainWindow(QMainWindow):
             QPushButton:disabled { color: #a0a6aa; background: #f0f2f3; }
             QPushButton#primaryButton { background: #3f4850; color: white; border-color: #3f4850; }
             QPushButton#primaryButton:hover { background: #30383e; }
+            QPushButton#deltaMoveButton {
+                min-width: 46px; padding: 1px 10px; background: #3f4850;
+                color: #ffffff; border-color: #3f4850; font-size: 15px;
+                font-weight: 700;
+            }
+            QPushButton#deltaMoveButton:hover { background: #30383e; }
+            QPushButton#deltaMoveButton:disabled {
+                background: #606970; color: #ffffff; border-color: #606970;
+            }
             QPushButton#homeButton, QPushButton#warningButton {
                 background: #f5f6f7; color: #30363a; border-color: #b9c0c5;
             }
@@ -1377,17 +1403,14 @@ class MainWindow(QMainWindow):
             QTableWidget::item:selected {
                 background: #e5e8ea; color: #22272b; font-weight: 700;
             }
-            QTableWidget QWidget[activeJointRow="true"] {
-                background: #eceff1;
-            }
             QTableWidget QDoubleSpinBox[activeJointRow="true"] {
-                background: #ffffff; border: 2px solid #69737a;
+                border: 1px solid #69737a;
             }
             QHeaderView::section {
                 background: #f0f2f3; padding: 7px; border: 0;
                 border-right: 1px solid #dfe3e5; font-weight: 650;
             }
-            QDoubleSpinBox { min-height: 28px; padding: 1px 6px; }
+            QDoubleSpinBox { min-height: 28px; }
             QTextEdit#logView {
                 background: #f7f8f9; color: #4c555b; border: 1px solid #e0e3e5;
                 border-radius: 4px; padding: 4px; font-family: monospace;

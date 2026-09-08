@@ -141,6 +141,7 @@ class PiperSimulationWidget(QWidget):
         from vtkmodules.vtkCommonMath import vtkMatrix4x4
         from vtkmodules.vtkFiltersCore import vtkPolyDataNormals
         from vtkmodules.vtkFiltersSources import vtkPlaneSource
+        from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
         from vtkmodules.vtkIOGeometry import vtkSTLReader
         from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
         from vtkmodules.vtkRenderingCore import (
@@ -170,6 +171,9 @@ class PiperSimulationWidget(QWidget):
         render_window = self._vtk_widget.GetRenderWindow()
         render_window.SetMultiSamples(4)
         render_window.AddRenderer(renderer)
+        interactor = render_window.GetInteractor()
+        self._interactor_style = vtkInteractorStyleTrackballCamera()
+        interactor.SetInteractorStyle(self._interactor_style)
         self._renderer = renderer
 
         renderer.AutomaticLightCreationOff()
