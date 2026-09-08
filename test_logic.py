@@ -9,6 +9,7 @@ from sensor_msgs.msg import JointState
 
 from arm_simulation import gripper_transforms, link_transforms
 from piper_gui import (
+    bounded_increment_target,
     ordered_joint_values,
     quaternion_to_euler_degrees,
     validate_gripper_target,
@@ -36,12 +37,13 @@ class JointHelpersTest(unittest.TestCase):
         valid, reason, _ = validate_joint_target(current, target)
         self.assertTrue(valid, reason)
 
-    def test_rejects_large_step(self):
+    def test_accepts_large_target_change_within_joint_range(self):
         current = [0.0, 0.5, -0.5, 0.0, 0.0, 0.0]
         target = list(current)
         target[0] += math.radians(21.0)
-        valid, _, _ = validate_joint_target(current, target)
-        self.assertFalse(valid)
+        valid, reason, max_delta = validate_joint_target(current, target)
+        self.assertTrue(valid, reason)
+        self.assertAlmostEqual(math.degrees(max_delta), 21.0)
 
     def test_accepts_twenty_degree_step(self):
         current = [0.0, 0.5, -0.5, 0.0, 0.0, 0.0]
@@ -56,6 +58,52 @@ class JointHelpersTest(unittest.TestCase):
         target[1] = -0.01
         valid, _, _ = validate_joint_target(current, target)
         self.assertFalse(valid)
+
+    def test_outside_feedback_does_not_block_another_joint(self):
+        current = [
+            0.0,
+            math.radians(-1.89),
+            math.radians(2.85),
+            0.0,
+            0.0,
+            0.0,
+        ]
+        target = list(current)
+        target[3] = math.radians(20.0)
+        valid, reason, _ = validate_joint_target(current, target)
+        self.assertTrue(valid, reason)
+
+    def test_outside_feedback_cannot_move_farther_from_range(self):
+        current = [0.0, math.radians(-1.89), -0.5, 0.0, 0.0, 0.0]
+        target = list(current)
+        target[1] = math.radians(-2.0)
+        valid, _, _ = validate_joint_target(current, target)
+        self.assertFalse(valid)
+
+    def test_increment_uses_requested_delta_inside_range(self):
+        current = [0.0, 0.5, -0.5, 0.0, 0.0, 0.0]
+        target, applied = bounded_increment_target(current, 0, 20.0)
+        self.assertAlmostEqual(applied, 20.0)
+        self.assertAlmostEqual(target[0], math.radians(20.0))
+        self.assertEqual(target[1:], current[1:])
+
+    def test_increment_is_clipped_to_remaining_range(self):
+        current = [math.radians(145.0), 0.5, -0.5, 0.0, 0.0, 0.0]
+        target, applied = bounded_increment_target(current, 0, 20.0)
+        self.assertAlmostEqual(applied, 5.0, places=5)
+        self.assertAlmostEqual(target[0], math.radians(150.0), places=6)
+
+    def test_negative_increment_is_clipped_to_lower_range(self):
+        current = [0.0, math.radians(6.0), -0.5, 0.0, 0.0, 0.0]
+        target, applied = bounded_increment_target(current, 1, -20.0)
+        self.assertAlmostEqual(applied, -6.0, places=5)
+        self.assertAlmostEqual(target[1], 0.0, places=6)
+
+    def test_increment_at_boundary_does_not_move(self):
+        current = [math.radians(150.0), 0.5, -0.5, 0.0, 0.0, 0.0]
+        target, applied = bounded_increment_target(current, 0, 20.0)
+        self.assertAlmostEqual(applied, 0.0)
+        self.assertEqual(target, current)
 
     def test_quaternion_to_euler_identity(self):
         roll, pitch, yaw = quaternion_to_euler_degrees(0.0, 0.0, 0.0, 1.0)

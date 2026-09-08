@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -65,8 +66,6 @@ JOINT_LIMITS_RAD: Tuple[Tuple[float, float], ...] = (
 )
 
 FEEDBACK_STALE_SECONDS = 1.0
-MAX_JOINT_STEP_DEG = 20.0
-MAX_JOINT_STEP_RAD = math.radians(MAX_JOINT_STEP_DEG)
 GRIPPER_WIDTH_MIN_M = 0.0
 GRIPPER_WIDTH_MAX_M = 0.1
 GRIPPER_FORCE_MIN_N = 0.5
@@ -191,15 +190,24 @@ def ordered_joint_values(msg: JointState) -> Optional[List[float]]:
 def validate_joint_target(
     current: Sequence[float], target: Sequence[float]
 ) -> Tuple[bool, str, float]:
-    """Validate bounds and maximum one-command step."""
+    """Validate joint bounds and return the largest requested change."""
     if len(current) != 6 or len(target) != 6:
         return False, "关节数据必须包含 joint1～joint6", 0.0
 
-    for index, value in enumerate(target):
+    for index, (actual, value) in enumerate(zip(current, target)):
         lower, upper = JOINT_LIMITS_RAD[index]
+        if not math.isfinite(actual):
+            return False, f"joint{index + 1} 当前值不是有效数字", 0.0
         if not math.isfinite(value):
             return False, f"joint{index + 1} 目标值不是有效数字", 0.0
         if value < lower or value > upper:
+            # Feedback can sit slightly outside the nominal URDF range because of
+            # zero-point offsets.  Do not block another joint, but never allow an
+            # already-outside joint to move farther away from its valid range.
+            returning_from_below = actual < lower and value >= actual
+            returning_from_above = actual > upper and value <= actual
+            if returning_from_below or returning_from_above:
+                continue
             return (
                 False,
                 f"joint{index + 1} 超出限制 "
@@ -208,15 +216,33 @@ def validate_joint_target(
             )
 
     max_delta = max(abs(goal - actual) for actual, goal in zip(current, target))
-    if max_delta > MAX_JOINT_STEP_RAD + 1e-9:
-        return (
-            False,
-            f"单次最大变化 {math.degrees(max_delta):.2f}°，"
-            f"超过安全限制 {MAX_JOINT_STEP_DEG:.0f}°。"
-            "请同步当前位置后减小目标。",
-            max_delta,
-        )
     return True, "", max_delta
+
+
+def bounded_increment_target(
+    current: Sequence[float], joint_index: int, delta_degrees: float
+) -> Tuple[List[float], float]:
+    """Apply a signed increment without crossing the selected joint boundary."""
+    if len(current) != 6:
+        raise ValueError("关节数据必须包含 joint1～joint6")
+    if not 0 <= joint_index < len(JOINT_LIMITS_RAD):
+        raise IndexError("无效的关节索引")
+    if not math.isfinite(delta_degrees) or math.isclose(delta_degrees, 0.0):
+        raise ValueError("增量必须是非零有限数值")
+
+    lower, upper = JOINT_LIMITS_RAD[joint_index]
+    current_angle = float(current[joint_index])
+    requested_radians = math.radians(delta_degrees)
+    if requested_radians > 0.0:
+        remaining = max(0.0, upper - current_angle)
+        applied_radians = min(requested_radians, remaining)
+    else:
+        remaining = max(0.0, current_angle - lower)
+        applied_radians = -min(abs(requested_radians), remaining)
+
+    target = [float(value) for value in current]
+    target[joint_index] = current_angle + applied_radians
+    return target, math.degrees(applied_radians)
 
 
 def quaternion_to_euler_degrees(
@@ -539,11 +565,13 @@ class MainWindow(QMainWindow):
         self._last_log_time = 0.0
 
         self.current_joint_labels: List[QLabel] = []
+        self.delta_current_joint_labels: List[QLabel] = []
         self.motor_degree_labels: List[QLabel] = []
         self.motor_radian_labels: List[QLabel] = []
         self.motor_effort_labels: List[QLabel] = []
         self.simulation_joint_labels: List[QLabel] = []
         self.target_spinboxes: List[QDoubleSpinBox] = []
+        self.delta_spinboxes: List[QDoubleSpinBox] = []
         self.calibrate_buttons: List[QPushButton] = []
         self.execute_single_buttons: List[QPushButton] = []
         self.jog_buttons: List[QPushButton] = []
@@ -697,15 +725,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(
             self._page_heading(
                 "运动控制",
-                "设置关节目标并发送。",
+                "目标控制与增量控制。",
             )
         )
-        note = QLabel("示教使用实体按钮。单次关节变化不超过 20°。")
-        note.setObjectName("infoNote")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        layout.addWidget(self._build_jog_group())
-        layout.addWidget(self._build_joint_group(), 1)
+
+        self.joint_control_tabs = QTabWidget()
+        self.joint_control_tabs.setObjectName("jointControlTabs")
+
+        delta_page = QWidget()
+        delta_layout = QVBoxLayout(delta_page)
+        delta_layout.setContentsMargins(0, 8, 0, 0)
+        delta_layout.addStretch(1)
+        delta_layout.addWidget(self._build_delta_group())
+        delta_layout.addStretch(1)
+        self.joint_control_tabs.addTab(delta_page, "增量控制")
+
+        target_page = QWidget()
+        target_layout = QVBoxLayout(target_page)
+        target_layout.setContentsMargins(0, 8, 0, 0)
+        target_layout.addStretch(1)
+        target_layout.addWidget(self._build_joint_group())
+        target_layout.addStretch(1)
+        self.joint_control_tabs.addTab(target_page, "目标控制")
+        self.joint_control_tabs.currentChanged.connect(
+            self._on_joint_control_tab_changed
+        )
+
+        layout.addWidget(self.joint_control_tabs, 1)
         return page
 
     def _build_status_page(self) -> QWidget:
@@ -962,7 +1008,7 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_joint_group(self) -> QGroupBox:
-        group = QGroupBox("关节运动（单位：度）")
+        group = QGroupBox("关节目标（单位：度）")
         layout = QVBoxLayout(group)
 
         self.joint_table = QTableWidget(6, 5)
@@ -970,9 +1016,9 @@ class MainWindow(QMainWindow):
             [
                 "关节",
                 "当前角度",
+                "允许范围",
                 "目标角度",
-                "微调目标",
-                "单轴发送",
+                "执行",
             ]
         )
         self.joint_table.verticalHeader().setVisible(False)
@@ -980,6 +1026,7 @@ class MainWindow(QMainWindow):
         self.joint_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.joint_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.joint_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.joint_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.joint_table.cellClicked.connect(
             lambda row, column: self._highlight_joint_row(row)
         )
@@ -994,8 +1041,15 @@ class MainWindow(QMainWindow):
             self.current_joint_labels.append(degree_label)
             self.joint_table.setCellWidget(row, 1, degree_label)
 
-            spinbox = QDoubleSpinBox()
             lower, upper = JOINT_LIMITS_RAD[row]
+            range_label = QLabel(
+                f"{math.degrees(lower):.0f}° ～ {math.degrees(upper):.0f}°"
+            )
+            range_label.setObjectName("muted")
+            range_label.setAlignment(Qt.AlignCenter)
+            self.joint_table.setCellWidget(row, 2, range_label)
+
+            spinbox = QDoubleSpinBox()
             spinbox.setRange(math.degrees(lower), math.degrees(upper))
             spinbox.setDecimals(2)
             spinbox.setSingleStep(1.0)
@@ -1005,25 +1059,9 @@ class MainWindow(QMainWindow):
                 lambda index=row: self._highlight_joint_row(index)
             )
             self.target_spinboxes.append(spinbox)
-            self.joint_table.setCellWidget(row, 2, spinbox)
+            self.joint_table.setCellWidget(row, 3, spinbox)
 
-            adjust_widget = QWidget()
-            adjust_layout = QHBoxLayout(adjust_widget)
-            adjust_layout.setContentsMargins(2, 1, 2, 1)
-            adjust_layout.setSpacing(3)
-            minus_button = QPushButton("−1°")
-            plus_button = QPushButton("+1°")
-            minus_button.clicked.connect(
-                lambda checked=False, index=row: self._adjust_joint_target(index, -1.0)
-            )
-            plus_button.clicked.connect(
-                lambda checked=False, index=row: self._adjust_joint_target(index, 1.0)
-            )
-            adjust_layout.addWidget(minus_button)
-            adjust_layout.addWidget(plus_button)
-            self.joint_table.setCellWidget(row, 3, adjust_widget)
-
-            execute_button = QPushButton("发送")
+            execute_button = QPushButton("执行")
             execute_button.setObjectName("primaryButton")
             execute_button.setEnabled(False)
             execute_button.clicked.connect(
@@ -1033,22 +1071,24 @@ class MainWindow(QMainWindow):
             self.joint_table.setCellWidget(row, 4, execute_button)
             self.joint_table.setRowHeight(row, 46)
 
+        self.joint_table.setFixedHeight(330)
+
         header = self.joint_table.horizontalHeader()
         header.setStretchLastSection(False)
         for column in range(self.joint_table.columnCount()):
             header.setSectionResizeMode(column, QHeaderView.Fixed)
-        self.joint_table.setColumnWidth(0, 58)
-        self.joint_table.setColumnWidth(1, 74)
-        self.joint_table.setColumnWidth(3, 108)
-        self.joint_table.setColumnWidth(4, 76)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.joint_table.setColumnWidth(0, 70)
+        self.joint_table.setColumnWidth(1, 90)
+        self.joint_table.setColumnWidth(2, 170)
+        self.joint_table.setColumnWidth(4, 90)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
         layout.addWidget(self.joint_table)
 
         controls = QHBoxLayout()
         self.home_button = QPushButton("回零位")
         self.home_button.setObjectName("warningButton")
         self.sync_targets_button = QPushButton("同步当前姿态到目标")
-        self.execute_joints_button = QPushButton("发送六关节目标")
+        self.execute_joints_button = QPushButton("执行六关节目标")
         self.execute_joints_button.setObjectName("primaryButton")
         self.execute_joints_button.setEnabled(False)
         controls.addWidget(self.home_button)
@@ -1058,54 +1098,86 @@ class MainWindow(QMainWindow):
         layout.addLayout(controls)
         return group
 
-    def _build_jog_group(self) -> QGroupBox:
-        group = QGroupBox("关节点动（点击一次，移动一步）")
+    def _build_delta_group(self) -> QGroupBox:
+        group = QGroupBox("关节增量（单位：度）")
         layout = QVBoxLayout(group)
 
-        settings = QHBoxLayout()
-        settings.addWidget(QLabel("每步角度"))
-        self.jog_step_spin = QDoubleSpinBox()
-        self.jog_step_spin.setRange(0.1, 5.0)
-        self.jog_step_spin.setDecimals(1)
-        self.jog_step_spin.setSingleStep(0.5)
-        self.jog_step_spin.setValue(1.0)
-        self.jog_step_spin.setSuffix("°")
-        settings.addWidget(self.jog_step_spin)
-        settings.addSpacing(10)
-        self.active_joint_feedback_label = QLabel("当前关节：—")
-        self.active_joint_feedback_label.setObjectName("activeJointFeedback")
-        settings.addWidget(self.active_joint_feedback_label)
-        settings.addStretch(1)
-        settings.addWidget(QLabel("点动前需先解锁"))
-        self.jog_unlock_button = QPushButton("解锁点动")
-        self.jog_unlock_button.setCheckable(True)
-        self.jog_unlock_button.setObjectName("warningButton")
-        self.jog_unlock_button.clicked.connect(self._toggle_jog_mode)
-        settings.addWidget(self.jog_unlock_button)
-        layout.addLayout(settings)
+        self.delta_table = QTableWidget(6, 4)
+        self.delta_table.setHorizontalHeaderLabels(
+            ["关节", "当前角度", "增量", "移动"]
+        )
+        self.delta_table.verticalHeader().setVisible(False)
+        self.delta_table.setAlternatingRowColors(True)
+        self.delta_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.delta_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.delta_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.delta_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.delta_table.cellClicked.connect(
+            lambda row, column: self._highlight_joint_row(row)
+        )
 
-        controls = QGridLayout()
-        controls.setHorizontalSpacing(8)
-        controls.setVerticalSpacing(6)
-        for index, joint_name in enumerate(JOINT_NAMES):
-            row = index // 3
-            column = (index % 3) * 3
-            label = QLabel(joint_name)
-            label.setAlignment(Qt.AlignCenter)
+        for row, name in enumerate(JOINT_NAMES):
+            name_item = QTableWidgetItem(name)
+            name_item.setTextAlignment(Qt.AlignCenter)
+            self.delta_table.setItem(row, 0, name_item)
+
+            degree_label = QLabel("—")
+            degree_label.setAlignment(Qt.AlignCenter)
+            self.delta_current_joint_labels.append(degree_label)
+            self.delta_table.setCellWidget(row, 1, degree_label)
+
+            delta_spinbox = QDoubleSpinBox()
+            lower, upper = JOINT_LIMITS_RAD[row]
+            delta_spinbox.setRange(0.1, math.degrees(upper - lower))
+            delta_spinbox.setDecimals(1)
+            delta_spinbox.setSingleStep(0.1)
+            delta_spinbox.setValue(20.0)
+            delta_spinbox.setSuffix("°")
+            delta_spinbox.editingFinished.connect(
+                lambda index=row: self._highlight_joint_row(index)
+            )
+            self.delta_spinboxes.append(delta_spinbox)
+            self.delta_table.setCellWidget(row, 2, delta_spinbox)
+
+            move_widget = QWidget()
+            move_layout = QHBoxLayout(move_widget)
+            move_layout.setContentsMargins(8, 2, 8, 2)
+            move_layout.setSpacing(6)
             minus_button = QPushButton("−")
             plus_button = QPushButton("+")
             minus_button.setEnabled(False)
             plus_button.setEnabled(False)
             minus_button.clicked.connect(
-                lambda checked=False, joint=index: self._jog_joint(joint, -1.0)
+                lambda checked=False, joint=row: self._jog_joint(joint, -1.0)
             )
             plus_button.clicked.connect(
-                lambda checked=False, joint=index: self._jog_joint(joint, 1.0)
+                lambda checked=False, joint=row: self._jog_joint(joint, 1.0)
             )
             self.jog_buttons.extend((minus_button, plus_button))
-            controls.addWidget(label, row, column)
-            controls.addWidget(minus_button, row, column + 1)
-            controls.addWidget(plus_button, row, column + 2)
+            move_layout.addWidget(minus_button)
+            move_layout.addWidget(plus_button)
+            self.delta_table.setCellWidget(row, 3, move_widget)
+            self.delta_table.setRowHeight(row, 48)
+
+        self.delta_table.setFixedHeight(342)
+
+        header = self.delta_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column in range(self.delta_table.columnCount()):
+            header.setSectionResizeMode(column, QHeaderView.Fixed)
+        self.delta_table.setColumnWidth(0, 86)
+        self.delta_table.setColumnWidth(1, 130)
+        self.delta_table.setColumnWidth(3, 180)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        layout.addWidget(self.delta_table)
+
+        controls = QHBoxLayout()
+        controls.addStretch(1)
+        self.jog_unlock_button = QPushButton("解锁增量控制")
+        self.jog_unlock_button.setCheckable(True)
+        self.jog_unlock_button.setObjectName("warningButton")
+        self.jog_unlock_button.clicked.connect(self._toggle_jog_mode)
+        controls.addWidget(self.jog_unlock_button)
         layout.addLayout(controls)
         return group
 
@@ -1259,6 +1331,20 @@ class MainWindow(QMainWindow):
                 background: #f1f3f4; color: #555e64; border: 1px solid #dfe3e5;
                 border-radius: 5px; padding: 9px 11px;
             }
+            QTabWidget#jointControlTabs::pane {
+                border: 0; background: transparent;
+            }
+            QTabWidget#jointControlTabs QTabBar::tab {
+                min-width: 120px; padding: 8px 18px; margin-right: 4px;
+                background: #eceff1; color: #5d666c;
+                border: 1px solid #dde1e3; border-radius: 5px;
+            }
+            QTabWidget#jointControlTabs QTabBar::tab:hover {
+                background: #e5e8ea;
+            }
+            QTabWidget#jointControlTabs QTabBar::tab:selected {
+                background: #3f4850; color: #ffffff; border-color: #3f4850;
+            }
             QGroupBox {
                 font-weight: 650; border: 1px solid #dfe3e5; border-radius: 6px;
                 margin-top: 12px; padding: 12px 8px 8px 8px; background: #ffffff;
@@ -1319,9 +1405,6 @@ class MainWindow(QMainWindow):
             QLabel#telemetryValue {
                 color: #2c3236; font-family: monospace; font-weight: 650;
                 min-width: 62px;
-            }
-            QLabel#activeJointFeedback {
-                color: #202427; font-family: monospace; font-weight: 700;
             }
             QLabel#gripperStatusValue {
                 color: #2c3236; font-family: monospace; font-weight: 650;
@@ -1589,13 +1672,15 @@ class MainWindow(QMainWindow):
     def _toggle_jog_mode(self, checked: bool) -> None:
         if not checked:
             self._lock_jog()
-            self._log("关节点动已锁定")
+            self._log("增量控制已锁定")
             return
-        if not self._require_fresh_feedback("解锁点动"):
+        if not self._require_fresh_feedback("解锁增量控制"):
             self._lock_jog()
             return
         if not self._status_feedback_fresh():
-            QMessageBox.warning(self, "状态反馈不可用", "机械臂状态反馈中断，不能解锁点动。")
+            QMessageBox.warning(
+                self, "状态反馈不可用", "机械臂状态反馈中断，不能解锁增量控制。"
+            )
             self._lock_jog()
             return
         if self.enable_state is not True:
@@ -1603,14 +1688,16 @@ class MainWindow(QMainWindow):
             self._lock_jog()
             return
         if self._is_teaching():
-            QMessageBox.warning(self, "示教模式", "机械臂仍处于示教状态，不能解锁点动。")
+            QMessageBox.warning(
+                self, "示教模式", "机械臂仍处于示教状态，不能解锁增量控制。"
+            )
             self._lock_jog()
             return
 
         answer = QMessageBox.warning(
             self,
-            "确认解锁关节点动",
-            "解锁后，点击任一关节的 +/− 按钮会立即让真机移动一步，"
+            "确认解锁增量控制",
+            "解锁后，点击任一关节的 +/− 按钮会立即让真机移动，"
             "不再逐次弹出确认框。\n\n"
             "请清空运动范围、拿好实体急停，并在操作结束后重新锁定。",
             QMessageBox.Yes | QMessageBox.Cancel,
@@ -1620,17 +1707,17 @@ class MainWindow(QMainWindow):
             self._lock_jog()
             return
         self.jog_unlocked = True
-        self.jog_unlock_button.setText("锁定点动")
+        self.jog_unlock_button.setText("锁定增量控制")
         self.jog_unlock_button.setObjectName("dangerButton")
         self.jog_unlock_button.style().unpolish(self.jog_unlock_button)
         self.jog_unlock_button.style().polish(self.jog_unlock_button)
         self._set_jog_buttons_enabled(True)
-        self._log("关节点动已解锁；点击 +/− 将立即运动")
+        self._log("增量控制已解锁；点击 +/− 将立即运动")
 
     def _lock_jog(self) -> None:
         self.jog_unlocked = False
         self.jog_unlock_button.setChecked(False)
-        self.jog_unlock_button.setText("解锁点动")
+        self.jog_unlock_button.setText("解锁增量控制")
         self.jog_unlock_button.setObjectName("warningButton")
         self.jog_unlock_button.style().unpolish(self.jog_unlock_button)
         self.jog_unlock_button.style().polish(self.jog_unlock_button)
@@ -1640,67 +1727,74 @@ class MainWindow(QMainWindow):
         for button in self.jog_buttons:
             button.setEnabled(enabled)
 
+    def _on_joint_control_tab_changed(self, index: int) -> None:
+        if index != 0 and self.jog_unlocked:
+            self._lock_jog()
+            self._log("离开增量控制，控制已锁定")
+
     def _highlight_joint_row(self, joint_index: int) -> None:
         if not 0 <= joint_index < len(JOINT_NAMES):
             return
         self.highlighted_joint_index = joint_index
-        self.joint_table.selectRow(joint_index)
-        for row in range(self.joint_table.rowCount()):
-            active = row == joint_index
-            for column in range(1, self.joint_table.columnCount()):
-                widget = self.joint_table.cellWidget(row, column)
-                if widget is None:
-                    continue
-                widget.setProperty("activeJointRow", active)
-                widget.style().unpolish(widget)
-                widget.style().polish(widget)
-        self._update_active_joint_feedback()
-
-    def _update_active_joint_feedback(self) -> None:
-        if self.highlighted_joint_index is None:
-            self.active_joint_feedback_label.setText("当前关节：—")
-            return
-        index = self.highlighted_joint_index
-        angle = "—"
-        if self.current_joints is not None:
-            angle = f"{math.degrees(self.current_joints[index]):.2f}°"
-        self.active_joint_feedback_label.setText(
-            f"当前关节：{JOINT_NAMES[index]} · 实时 {angle}"
-        )
+        for table in (self.joint_table, self.delta_table):
+            table.selectRow(joint_index)
+            for row in range(table.rowCount()):
+                active = row == joint_index
+                for column in range(1, table.columnCount()):
+                    widget = table.cellWidget(row, column)
+                    if widget is None:
+                        continue
+                    widget.setProperty("activeJointRow", active)
+                    widget.style().unpolish(widget)
+                    widget.style().polish(widget)
 
     def _jog_joint(self, joint_index: int, direction: float) -> None:
         self._highlight_joint_row(joint_index)
         if not self.jog_unlocked:
-            QMessageBox.information(self, "点动已锁定", "请先确认安全并解锁点动。")
+            QMessageBox.information(
+                self, "增量控制已锁定", "请先确认安全并解锁增量控制。"
+            )
             return
         if not self._feedback_fresh() or self.current_joints is None:
             self._lock_jog()
-            QMessageBox.warning(self, "反馈中断", "关节反馈已中断，点动已自动锁定。")
+            QMessageBox.warning(
+                self, "反馈中断", "关节反馈已中断，增量控制已自动锁定。"
+            )
             return
         if self.enable_state is not True or self._is_teaching():
             self._lock_jog()
-            QMessageBox.warning(self, "状态变化", "机械臂不能继续点动，点动已自动锁定。")
+            QMessageBox.warning(
+                self, "状态变化", "机械臂不能继续运动，增量控制已自动锁定。"
+            )
             return
         if not self._status_feedback_fresh() or (
             self.latest_status is not None and self.latest_status.motion_status != 0
         ):
-            self.statusBar().showMessage("机械臂尚未静止，请等待后再点动", 3000)
+            self.statusBar().showMessage("机械臂尚未静止，请等待后再执行", 3000)
             return
         if self.pending_joint_target is not None or self.pending_gripper_target is not None:
             return
 
-        step_degrees = self.jog_step_spin.value() * direction
-        target = list(self.current_joints)
-        target[joint_index] += math.radians(step_degrees)
-        lower, upper = JOINT_LIMITS_RAD[joint_index]
-        if not lower <= target[joint_index] <= upper:
-            message = f"joint{joint_index + 1} 点动目标超过关节限制，已拒绝"
+        requested_degrees = self.delta_spinboxes[joint_index].value() * direction
+        target, applied_degrees = bounded_increment_target(
+            self.current_joints, joint_index, requested_degrees
+        )
+        if math.isclose(applied_degrees, 0.0, abs_tol=1e-9):
+            direction_text = "上限" if direction > 0 else "下限"
+            message = f"joint{joint_index + 1} 已到允许{direction_text}"
             self.statusBar().showMessage(message, 4000)
             self._log(message)
             return
+        if not math.isclose(applied_degrees, requested_degrees, abs_tol=1e-6):
+            message = (
+                f"joint{joint_index + 1} 可移动角度不足："
+                f"{requested_degrees:+.1f}° 调整为 {applied_degrees:+.1f}°"
+            )
+            self.statusBar().showMessage(message, 5000)
+            self._log(message)
         self._request_joint_motion(
             target,
-            f"joint{joint_index + 1} 点动 {step_degrees:+.1f}°",
+            f"joint{joint_index + 1} 增量 {applied_degrees:+.1f}°",
             require_confirmation=False,
             require_synced_target=False,
         )
@@ -1716,30 +1810,6 @@ class MainWindow(QMainWindow):
         for spinbox in self.target_spinboxes:
             spinbox.setEnabled(False)
         self._set_joint_motion_buttons_enabled(False)
-
-    def _adjust_joint_target(self, joint_index: int, delta_degrees: float) -> None:
-        self._highlight_joint_row(joint_index)
-        if not self.targets_initialized:
-            QMessageBox.information(
-                self,
-                "目标尚未同步",
-                "请等待反馈自动同步，或点击“同步当前姿态到目标”。",
-            )
-            return
-        spinbox = self.target_spinboxes[joint_index]
-        before = spinbox.value()
-        spinbox.setValue(before + delta_degrees)
-        after = spinbox.value()
-        joint_name = JOINT_NAMES[joint_index]
-        if math.isclose(after, before, abs_tol=1e-9):
-            direction = "+" if delta_degrees > 0 else "−"
-            message = f"{joint_name} 无法继续向 {direction} 调整：已到目标角度限制"
-            self._log(message)
-            self.statusBar().showMessage(message, 4000)
-        else:
-            message = f"{joint_name} 目标：{before:.2f}° → {after:.2f}°（尚未执行）"
-            self._log(message)
-            self.statusBar().showMessage(message, 4000)
 
     def _execute_single_joint(self, joint_index: int) -> None:
         self._highlight_joint_row(joint_index)
@@ -1762,7 +1832,7 @@ class MainWindow(QMainWindow):
         require_confirmation: bool = True,
         require_synced_target: bool = True,
     ) -> None:
-        if not self._require_fresh_feedback("执行关节目标"):
+        if not self._require_fresh_feedback("执行关节运动"):
             return
         if self.enable_state is not True:
             QMessageBox.warning(self, "尚未使能", "请先通过本界面的“使能”按钮使能机械臂。")
@@ -1859,6 +1929,7 @@ class MainWindow(QMainWindow):
         for row, value in enumerate(ordered):
             degrees = math.degrees(value)
             self.current_joint_labels[row].setText(f"{degrees:.2f}°")
+            self.delta_current_joint_labels[row].setText(f"{degrees:.2f}°")
             self.motor_degree_labels[row].setText(f"{degrees:.2f}°")
             self.motor_radian_labels[row].setText(f"{value:.5f}")
             effort = effort_by_name.get(JOINT_NAMES[row])
@@ -1866,7 +1937,6 @@ class MainWindow(QMainWindow):
                 "—" if effort is None else f"{effort:.3f}"
             )
             self.simulation_joint_labels[row].setText(f"{degrees:.2f}°")
-        self._update_active_joint_feedback()
         self.arm_view.set_joint_positions(ordered)
 
         if (
